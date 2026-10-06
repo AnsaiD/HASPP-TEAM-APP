@@ -365,6 +365,66 @@ def update_user(
     return user_dict(u)
 
 
+class AdminUserCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    email: str = Field(min_length=3, max_length=120)
+    password: str = Field(min_length=6, max_length=128)
+    role: str = "member"
+
+
+@app.post("/api/users")
+def admin_create_user(
+    data: AdminUserCreate,
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Admin creates a user directly (no self-registration needed)."""
+    require_admin(user)
+    email = data.email.strip().lower()
+    if db.query(User).filter_by(email=email).first():
+        raise HTTPException(400, "Email already registered")
+    if data.role not in ("admin", "member"):
+        raise HTTPException(400, "Invalid role")
+    u = User(
+        name=data.name.strip(),
+        email=email,
+        password_hash=hash_password(data.password),
+        role=data.role,
+        is_active=True,
+        created_at=now_iso(),
+    )
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    return user_dict(u)
+
+
+@app.delete("/api/users/{uid}")
+def delete_user(
+    uid: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    """Admin permanently deletes a user (and their boards/cards)."""
+    require_admin(user)
+    if uid == user["id"]:
+        raise HTTPException(400, "You cannot delete yourself")
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "User not found")
+    if u.role == "admin":
+        admin_count = db.query(func.count(User.id)).filter_by(role="admin").scalar()
+        if admin_count <= 1:
+            raise HTTPException(400, "Cannot delete the last admin")
+    # delete boards created by this user (their lists & cards cascade)
+    for b in db.query(Board).filter_by(created_by=uid).all():
+        db.delete(b)
+    # delete cards created by this user on other boards
+    db.query(Card).filter_by(created_by=uid).delete(synchronize_session=False)
+    # board memberships cascade; card assignees SET NULL automatically
+    db.delete(u)
+    db.commit()
+    return {"ok": True}
+
+
 # ---------------- board routes ----------------
 @app.get("/api/boards")
 def list_boards(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):

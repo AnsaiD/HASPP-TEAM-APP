@@ -21,6 +21,10 @@ const T = {
     cannotDeactivateSelf: "Ma joojin kartid naftaada",
     member: "member", adminRole: "admin",
     deleteBoard: "Tirtir board-ka",
+    addUser: "Ku dar user cusub",
+    confirmDeleteUser: "Ma hubtaa inaad TIRTIRTO user-kan? Tani waa permanent!",
+    cannotDeleteSelf: "Ma tirtiri kartid naftaada",
+    cannotDeleteLastAdmin: "Ma tirtiri kartid admin-ka ugu dambeeya",
   },
   en: {
     login: "Log in", register: "Sign up", name: "Name", email: "Email",
@@ -43,6 +47,10 @@ const T = {
     cannotDeactivateSelf: "You cannot deactivate yourself",
     member: "member", adminRole: "admin",
     deleteBoard: "Delete board",
+    addUser: "Add new user",
+    confirmDeleteUser: "Are you sure you want to DELETE this user? This is permanent!",
+    cannotDeleteSelf: "You cannot delete yourself",
+    cannotDeleteLastAdmin: "Cannot delete the last admin",
   }
 };
 let lang = localStorage.getItem("hta_lang") || "so";
@@ -308,6 +316,17 @@ async function renderAdmin() {
       <h2>⚙️ ${t("admin")} — ${t("users")}</h2>
     </div>
     <p class="hint">${t("firstUser")}</p>
+    <div class="add-user-form">
+      <h3>➕ ${t("addUser")}</h3>
+      <input id="nuName" placeholder="${t("name")}">
+      <input id="nuEmail" placeholder="${t("email")}" type="email">
+      <input id="nuPass" placeholder="${t("password")}" type="password">
+      <select id="nuRole">
+        <option value="member">${t("member")}</option>
+        <option value="admin">${t("adminRole")}</option>
+      </select>
+      <button class="btn" id="nuAdd">${t("add")}</button>
+    </div>
     <table class="admin-table">
       <tr><th>${t("name")}</th><th>${t("email")}</th><th>${t("role")}</th><th>${t("active")}</th><th></th></tr>
       ${users.map(u => `
@@ -322,7 +341,8 @@ async function renderAdmin() {
               <option value="admin" ${u.role === "admin" ? "selected" : ""}>admin</option>
             </select>
             ${u.id !== me.id ? `<button class="btn-small ${u.is_active ? "btn-danger" : ""}" data-toggle="${u.id}">
-              ${u.is_active ? "Deactivate" : "Activate"}</button>` : ""}
+              ${u.is_active ? "Deactivate" : "Activate"}</button>
+            <button class="btn-small btn-danger" data-deluser="${u.id}">🗑️ ${t("delete")}</button>` : ""}
           </td>
         </tr>`).join("")}
     </table>`;
@@ -340,6 +360,30 @@ async function renderAdmin() {
       await api("/users/" + id, "PATCH", { is_active: !u.is_active });
       renderAdmin();
     });
+  document.querySelectorAll("[data-deluser]").forEach(btn =>
+    btn.onclick = async () => {
+      if (!confirm(t("confirmDeleteUser"))) return;
+      try {
+        await api("/users/" + btn.dataset.deluser, "DELETE");
+        renderAdmin();
+      } catch (e) { alert(e.message); }
+    });
+  $("#nuAdd").onclick = async () => {
+    const body = {
+      name: $("#nuName").value.trim(),
+      email: $("#nuEmail").value.trim(),
+      password: $("#nuPass").value,
+      role: $("#nuRole").value,
+    };
+    if (!body.name || !body.email || body.password.length < 6) {
+      alert(t("wrongCreds"));
+      return;
+    }
+    try {
+      await api("/users", "POST", body);
+      renderAdmin();
+    } catch (e) { alert(e.message); }
+  };
 }
 
 /* ---------- main render ---------- */
