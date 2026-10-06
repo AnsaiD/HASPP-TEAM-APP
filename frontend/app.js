@@ -20,6 +20,7 @@ const T = {
     noBoards: "Wali board ma jiro. Samee mid cusub!",
     cannotDeactivateSelf: "Ma joojin kartid naftaada",
     member: "member", adminRole: "admin",
+    deleteBoard: "Tirtir board-ka",
   },
   en: {
     login: "Log in", register: "Sign up", name: "Name", email: "Email",
@@ -41,6 +42,7 @@ const T = {
     noBoards: "No boards yet. Create one!",
     cannotDeactivateSelf: "You cannot deactivate yourself",
     member: "member", adminRole: "admin",
+    deleteBoard: "Delete board",
   }
 };
 let lang = localStorage.getItem("hta_lang") || "so";
@@ -143,6 +145,7 @@ async function renderBoard() {
       <input id="nlTitle" placeholder="${t("addList")}" style="margin-left:auto">
       <button class="btn" id="nlBtn">${t("addList")}</button>
       <button class="btn btn-outline" id="memBtn">👥 ${t("members")} (${b.members.length})</button>
+      ${isBAdmin ? `<button class="btn btn-danger" id="delBoardBtn">${t("deleteBoard")}</button>` : ""}
     </div>
     <div class="kanban" id="kanban">
       ${b.lists.map(l => `
@@ -161,6 +164,12 @@ async function renderBoard() {
     renderBoard();
   };
   $("#memBtn").onclick = () => showMembersModal(b, isBAdmin);
+  const delB = $("#delBoardBtn");
+  if (delB) delB.onclick = async () => {
+    if (!confirm(t("confirmDelete"))) return;
+    await api("/boards/" + currentBoard, "DELETE");
+    view = "dashboard"; currentBoard = null; render();
+  };
   document.querySelectorAll("[data-del-list]").forEach(el =>
     el.onclick = async (e) => {
       e.stopPropagation();
