@@ -30,7 +30,27 @@ cd backend && uvicorn app:app --host 0.0.0.0 --port 8000
 
 **Si kooxdu meel kasta uga gasho, app-ka waa in la dhigaa hosting.**
 
-### Option A — Render.com (free, easiest)
+### Step 1 — PostgreSQL database (free, xog joogto ah)
+
+Render's free web services have an **ephemeral filesystem**: the SQLite
+database is wiped on every restart. Use a free PostgreSQL database so
+data survives restarts:
+
+1. Render dashboard → **New +** → **PostgreSQL**
+2. Name: `haspp-team-db` → Plan: **Free** → Create Database
+3. Copy the **Internal Database URL** (looks like
+   `postgresql://user:pass@host/dbname`)
+4. Go to your web service → **Environment** tab → add:
+   - Key: `DATABASE_URL`, Value: the URL you copied
+   - Key: `SECRET_KEY`, Value: a long random string (keep it secret —
+     without it, everyone is logged out on every restart)
+5. **Save** → the service redeploys automatically. Tables are created
+   automatically on first boot.
+
+Local development still uses SQLite automatically when `DATABASE_URL`
+is not set — no setup needed.
+
+### Step 2 — Web service (Render.com, free)
 
 1. Create a free account at render.com and push this folder to a GitHub repo.
 2. In Render: **New → Web Service** → connect the repo.

@@ -1,32 +1,100 @@
 """
-HASPP Team App — backend
+HASPP Team App — backend (SQLAlchemy)
 Multi-user team workspace: login, admin permissions, shared kanban boards.
+Database: PostgreSQL when DATABASE_URL is set, otherwise local SQLite.
 First registered user automatically becomes admin.
 Run: uvicorn app:app --host 0.0.0.0 --port 8000
 """
 import hashlib
 import os
 import secrets
-import sqlite3
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from pydantic import BaseModel, Field
+from sqlalchemy import (Boolean, Column, ForeignKey, Integer, String, Text,
+                        create_engine, func, select)
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "haspp_team.db"
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
 
 SECRET_KEY = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 ALGORITHM = "HS256"
 TOKEN_HOURS = 72
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+if DATABASE_URL.startswith("postgresql"):
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+else:
+    engine = create_engine(
+        f"sqlite:///{BASE_DIR / 'haspp_team.db'}",
+        connect_args={"check_same_thread": False},
+    )
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+Base = declarative_base()
+
+
+# ---------------- models ----------------
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(80), nullable=False)
+    email = Column(String(120), nullable=False, unique=True)
+    password_hash = Column(String(256), nullable=False)
+    role = Column(String(16), nullable=False, default="member")  # admin | member
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(String(40), nullable=False)
+
+
+class Board(Base):
+    __tablename__ = "boards"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(120), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(String(40), nullable=False)
+
+
+class BoardMember(Base):
+    __tablename__ = "board_members"
+    board_id = Column(Integer, ForeignKey("boards.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    role = Column(String(16), nullable=False, default="member")  # admin | member
+
+
+class List(Base):
+    __tablename__ = "lists"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board_id = Column(Integer, ForeignKey("boards.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String(120), nullable=False)
+    position = Column(Integer, nullable=False, default=0)
+
+
+class Card(Base):
+    __tablename__ = "cards"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    board_id = Column(Integer, ForeignKey("boards.id", ondelete="CASCADE"), nullable=False)
+    list_id = Column(Integer, ForeignKey("lists.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    assignee_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    due_date = Column(String(20), nullable=True)
+    position = Column(Integer, nullable=False, default=0)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(String(40), nullable=False)
+
+
+Base.metadata.create_all(engine)
 
 app = FastAPI(title="HASPP Team App")
 app.add_middleware(
@@ -39,68 +107,15 @@ app.add_middleware(
 security = HTTPBearer(auto_error=False)
 
 
-# ---------------- database ----------------
-def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
-
-
-def init_db():
-    conn = db()
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'member',   -- admin | member
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS boards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            created_by INTEGER NOT NULL REFERENCES users(id),
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS board_members (
-            board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            role TEXT NOT NULL DEFAULT 'member',   -- admin | member
-            PRIMARY KEY (board_id, user_id)
-        );
-        CREATE TABLE IF NOT EXISTS lists (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-            title TEXT NOT NULL,
-            position INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS cards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-            list_id INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
-            title TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-            due_date TEXT,
-            position INTEGER NOT NULL DEFAULT 0,
-            created_by INTEGER NOT NULL REFERENCES users(id),
-            created_at TEXT NOT NULL
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
-
-
-init_db()
-
-
 # ---------------- helpers ----------------
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -125,19 +140,20 @@ def make_token(user_id: int) -> str:
     return jwt.encode({"sub": str(user_id), "exp": exp}, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def row_to_user(r) -> dict:
+def user_dict(u: User) -> dict:
     return {
-        "id": r["id"],
-        "name": r["name"],
-        "email": r["email"],
-        "role": r["role"],
-        "is_active": bool(r["is_active"]),
-        "created_at": r["created_at"],
+        "id": u.id,
+        "name": u.name,
+        "email": u.email,
+        "role": u.role,
+        "is_active": bool(u.is_active),
+        "created_at": u.created_at,
     }
 
 
 def get_current_user(
     creds: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
 ) -> dict:
     if not creds:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
@@ -146,12 +162,10 @@ def get_current_user(
         user_id = int(payload["sub"])
     except (JWTError, ValueError, KeyError):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-    conn = db()
-    r = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    conn.close()
-    if not r or not r["is_active"]:
+    u = db.get(User, user_id)
+    if not u or not u.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User inactive or missing")
-    return row_to_user(r)
+    return user_dict(u)
 
 
 def require_admin(user: dict) -> dict:
@@ -160,74 +174,81 @@ def require_admin(user: dict) -> dict:
     return user
 
 
-def can_access_board(conn, user: dict, board_id: int) -> bool:
+def can_access_board(db: Session, user: dict, board_id: int) -> bool:
     if user["role"] == "admin":
         return True
-    r = conn.execute(
-        "SELECT 1 FROM board_members WHERE board_id = ? AND user_id = ?",
-        (board_id, user["id"]),
-    ).fetchone()
-    return r is not None
+    return (
+        db.query(BoardMember)
+        .filter_by(board_id=board_id, user_id=user["id"])
+        .first()
+        is not None
+    )
 
 
-def is_board_admin(conn, user: dict, board_id: int) -> bool:
+def is_board_admin(db: Session, user: dict, board_id: int) -> bool:
     if user["role"] == "admin":
         return True
-    r = conn.execute(
-        "SELECT role FROM board_members WHERE board_id = ? AND user_id = ?",
-        (board_id, user["id"]),
-    ).fetchone()
-    return r is not None and r["role"] == "admin"
+    m = (
+        db.query(BoardMember)
+        .filter_by(board_id=board_id, user_id=user["id"])
+        .first()
+    )
+    return m is not None and m.role == "admin"
 
 
-def board_detail(conn, board_id: int) -> dict:
-    b = conn.execute("SELECT * FROM boards WHERE id = ?", (board_id,)).fetchone()
+def board_detail(db: Session, board_id: int) -> dict:
+    b = db.get(Board, board_id)
     if not b:
         raise HTTPException(404, "Board not found")
-    lists = conn.execute(
-        "SELECT * FROM lists WHERE board_id = ? ORDER BY position, id", (board_id,)
-    ).fetchall()
-    members = conn.execute(
-        """SELECT u.id, u.name, u.email, bm.role FROM board_members bm
-           JOIN users u ON u.id = bm.user_id WHERE bm.board_id = ?""",
-        (board_id,),
-    ).fetchall()
+    lists = (
+        db.query(List)
+        .filter_by(board_id=board_id)
+        .order_by(List.position, List.id)
+        .all()
+    )
+    members = (
+        db.query(BoardMember, User)
+        .join(User, User.id == BoardMember.user_id)
+        .filter(BoardMember.board_id == board_id)
+        .all()
+    )
     out_lists = []
     for lst in lists:
-        cards = conn.execute(
-            """SELECT c.*, u.name AS assignee_name FROM cards c
-               LEFT JOIN users u ON u.id = c.assignee_id
-               WHERE c.list_id = ? ORDER BY c.position, c.id""",
-            (lst["id"],),
-        ).fetchall()
+        cards = (
+            db.query(Card, User.name.label("assignee_name"))
+            .outerjoin(User, User.id == Card.assignee_id)
+            .filter(Card.list_id == lst.id)
+            .order_by(Card.position, Card.id)
+            .all()
+        )
         out_lists.append(
             {
-                "id": lst["id"],
-                "title": lst["title"],
-                "position": lst["position"],
+                "id": lst.id,
+                "title": lst.title,
+                "position": lst.position,
                 "cards": [
                     {
-                        "id": c["id"],
-                        "title": c["title"],
-                        "description": c["description"],
-                        "assignee_id": c["assignee_id"],
-                        "assignee_name": c["assignee_name"],
-                        "due_date": c["due_date"],
-                        "position": c["position"],
+                        "id": c.id,
+                        "title": c.title,
+                        "description": c.description,
+                        "assignee_id": c.assignee_id,
+                        "assignee_name": aname,
+                        "due_date": c.due_date,
+                        "position": c.position,
                     }
-                    for c in cards
+                    for c, aname in cards
                 ],
             }
         )
     return {
-        "id": b["id"],
-        "title": b["title"],
-        "description": b["description"],
-        "created_at": b["created_at"],
+        "id": b.id,
+        "title": b.title,
+        "description": b.description,
+        "created_at": b.created_at,
         "lists": out_lists,
         "members": [
-            {"id": m["id"], "name": m["name"], "email": m["email"], "role": m["role"]}
-            for m in members
+            {"id": u.id, "name": u.name, "email": u.email, "role": bm.role}
+            for bm, u in members
         ],
     }
 
@@ -281,37 +302,34 @@ class UserUpdate(BaseModel):
 
 # ---------------- auth routes ----------------
 @app.post("/api/register")
-def register(data: RegisterIn):
-    conn = db()
+def register(data: RegisterIn, db: Session = Depends(get_db)):
     email = data.email.strip().lower()
-    if conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
-        conn.close()
+    if db.query(User).filter_by(email=email).first():
         raise HTTPException(400, "Email already registered")
-    count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+    count = db.query(func.count(User.id)).scalar()
     role = "admin" if count == 0 else "member"  # first user becomes admin
-    cur = conn.execute(
-        "INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?,?,?,?,?)",
-        (data.name.strip(), email, hash_password(data.password), role, now_iso()),
+    u = User(
+        name=data.name.strip(),
+        email=email,
+        password_hash=hash_password(data.password),
+        role=role,
+        is_active=True,
+        created_at=now_iso(),
     )
-    conn.commit()
-    user_id = cur.lastrowid
-    r = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    conn.close()
-    return {"token": make_token(user_id), "user": row_to_user(r)}
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    return {"token": make_token(u.id), "user": user_dict(u)}
 
 
 @app.post("/api/login")
-def login(data: LoginIn):
-    conn = db()
-    r = conn.execute(
-        "SELECT * FROM users WHERE email = ?", (data.email.strip().lower(),)
-    ).fetchone()
-    conn.close()
-    if not r or not verify_password(data.password, r["password_hash"]):
+def login(data: LoginIn, db: Session = Depends(get_db)):
+    u = db.query(User).filter_by(email=data.email.strip().lower()).first()
+    if not u or not verify_password(data.password, u.password_hash):
         raise HTTPException(401, "Wrong email or password")
-    if not r["is_active"]:
+    if not u.is_active:
         raise HTTPException(403, "Account deactivated")
-    return {"token": make_token(r["id"]), "user": row_to_user(r)}
+    return {"token": make_token(u.id), "user": user_dict(u)}
 
 
 @app.get("/api/me")
@@ -321,272 +339,245 @@ def me(user: dict = Depends(get_current_user)):
 
 # ---------------- user admin routes ----------------
 @app.get("/api/users")
-def list_users(user: dict = Depends(get_current_user)):
+def list_users(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     require_admin(user)
-    conn = db()
-    rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
-    conn.close()
-    return [row_to_user(r) for r in rows]
+    return [user_dict(u) for u in db.query(User).order_by(User.id).all()]
 
 
 @app.patch("/api/users/{uid}")
-def update_user(uid: int, data: UserUpdate, user: dict = Depends(get_current_user)):
+def update_user(
+    uid: int, data: UserUpdate,
+    user: dict = Depends(get_current_user), db: Session = Depends(get_db),
+):
     require_admin(user)
     if uid == user["id"] and data.is_active is False:
         raise HTTPException(400, "You cannot deactivate yourself")
-    conn = db()
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "User not found")
     if data.role is not None:
         if data.role not in ("admin", "member"):
-            conn.close()
             raise HTTPException(400, "Invalid role")
-        conn.execute("UPDATE users SET role = ? WHERE id = ?", (data.role, uid))
+        u.role = data.role
     if data.is_active is not None:
-        conn.execute(
-            "UPDATE users SET is_active = ? WHERE id = ?", (1 if data.is_active else 0, uid)
-        )
-    conn.commit()
-    r = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
-    conn.close()
-    if not r:
-        raise HTTPException(404, "User not found")
-    return row_to_user(r)
+        u.is_active = bool(data.is_active)
+    db.commit()
+    return user_dict(u)
 
 
 # ---------------- board routes ----------------
 @app.get("/api/boards")
-def list_boards(user: dict = Depends(get_current_user)):
-    conn = db()
+def list_boards(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     if user["role"] == "admin":
-        rows = conn.execute("SELECT * FROM boards ORDER BY id DESC").fetchall()
+        boards = db.query(Board).order_by(Board.id.desc()).all()
     else:
-        rows = conn.execute(
-            """SELECT b.* FROM boards b JOIN board_members bm ON bm.board_id = b.id
-               WHERE bm.user_id = ? ORDER BY b.id DESC""",
-            (user["id"],),
-        ).fetchall()
-    conn.close()
-    return [
-        {"id": r["id"], "title": r["title"], "description": r["description"]}
-        for r in rows
-    ]
+        boards = (
+            db.query(Board)
+            .join(BoardMember, BoardMember.board_id == Board.id)
+            .filter(BoardMember.user_id == user["id"])
+            .order_by(Board.id.desc())
+            .all()
+        )
+    return [{"id": b.id, "title": b.title, "description": b.description} for b in boards]
 
 
 @app.post("/api/boards")
-def create_board(data: BoardIn, user: dict = Depends(get_current_user)):
-    conn = db()
-    cur = conn.execute(
-        "INSERT INTO boards (title, description, created_by, created_at) VALUES (?,?,?,?)",
-        (data.title.strip(), data.description.strip(), user["id"], now_iso()),
+def create_board(
+    data: BoardIn, user: dict = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    b = Board(
+        title=data.title.strip(),
+        description=data.description.strip(),
+        created_by=user["id"],
+        created_at=now_iso(),
     )
-    board_id = cur.lastrowid
-    conn.execute(
-        "INSERT INTO board_members (board_id, user_id, role) VALUES (?,?,?)",
-        (board_id, user["id"], "admin"),
-    )
+    db.add(b)
+    db.flush()
+    db.add(BoardMember(board_id=b.id, user_id=user["id"], role="admin"))
     for i, title in enumerate(["To Do", "In Progress", "Done"]):
-        conn.execute(
-            "INSERT INTO lists (board_id, title, position) VALUES (?,?,?)",
-            (board_id, title, i),
-        )
-    conn.commit()
-    detail = board_detail(conn, board_id)
-    conn.close()
-    return detail
+        db.add(List(board_id=b.id, title=title, position=i))
+    db.commit()
+    return board_detail(db, b.id)
 
 
 @app.get("/api/boards/{bid}")
-def get_board(bid: int, user: dict = Depends(get_current_user)):
-    conn = db()
-    if not can_access_board(conn, user, bid):
-        conn.close()
+def get_board(
+    bid: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    if not can_access_board(db, user, bid):
         raise HTTPException(403, "No access to this board")
-    detail = board_detail(conn, bid)
-    conn.close()
-    return detail
+    return board_detail(db, bid)
 
 
 @app.delete("/api/boards/{bid}")
-def delete_board(bid: int, user: dict = Depends(get_current_user)):
-    conn = db()
-    if not is_board_admin(conn, user, bid):
-        conn.close()
+def delete_board(
+    bid: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    if not is_board_admin(db, user, bid):
         raise HTTPException(403, "Board admin only")
-    conn.execute("DELETE FROM boards WHERE id = ?", (bid,))
-    conn.commit()
-    conn.close()
+    b = db.get(Board, bid)
+    if b:
+        # delete children first (portable across SQLite/Postgres)
+        db.query(Card).filter_by(board_id=bid).delete()
+        db.query(List).filter_by(board_id=bid).delete()
+        db.query(BoardMember).filter_by(board_id=bid).delete()
+        db.delete(b)
+        db.commit()
     return {"ok": True}
 
 
 @app.post("/api/boards/{bid}/members")
-def add_member(bid: int, data: MemberAdd, user: dict = Depends(get_current_user)):
-    conn = db()
-    if not is_board_admin(conn, user, bid):
-        conn.close()
+def add_member(
+    bid: int, data: MemberAdd,
+    user: dict = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    if not is_board_admin(db, user, bid):
         raise HTTPException(403, "Board admin only")
-    target = conn.execute("SELECT * FROM users WHERE id = ?", (data.user_id,)).fetchone()
-    if not target or not target["is_active"]:
-        conn.close()
+    target = db.get(User, data.user_id)
+    if not target or not target.is_active:
         raise HTTPException(404, "User not found or inactive")
     if data.role not in ("admin", "member"):
-        conn.close()
         raise HTTPException(400, "Invalid role")
-    conn.execute(
-        "INSERT OR REPLACE INTO board_members (board_id, user_id, role) VALUES (?,?,?)",
-        (bid, data.user_id, data.role),
+    m = (
+        db.query(BoardMember)
+        .filter_by(board_id=bid, user_id=data.user_id)
+        .first()
     )
-    conn.commit()
-    conn.close()
+    if m:
+        m.role = data.role
+    else:
+        db.add(BoardMember(board_id=bid, user_id=data.user_id, role=data.role))
+    db.commit()
     return {"ok": True}
 
 
 @app.delete("/api/boards/{bid}/members/{uid}")
-def remove_member(bid: int, uid: int, user: dict = Depends(get_current_user)):
-    conn = db()
-    if not is_board_admin(conn, user, bid):
-        conn.close()
+def remove_member(
+    bid: int, uid: int,
+    user: dict = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    if not is_board_admin(db, user, bid):
         raise HTTPException(403, "Board admin only")
-    conn.execute(
-        "DELETE FROM board_members WHERE board_id = ? AND user_id = ?", (bid, uid)
-    )
-    conn.commit()
-    conn.close()
+    db.query(BoardMember).filter_by(board_id=bid, user_id=uid).delete()
+    db.commit()
     return {"ok": True}
 
 
 # ---------------- list routes ----------------
 @app.post("/api/boards/{bid}/lists")
-def create_list(bid: int, data: ListIn, user: dict = Depends(get_current_user)):
-    conn = db()
-    if not can_access_board(conn, user, bid):
-        conn.close()
+def create_list(
+    bid: int, data: ListIn,
+    user: dict = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    if not can_access_board(db, user, bid):
         raise HTTPException(403, "No access to this board")
-    mx = conn.execute(
-        "SELECT COALESCE(MAX(position), -1) AS m FROM lists WHERE board_id = ?", (bid,)
-    ).fetchone()["m"]
-    cur = conn.execute(
-        "INSERT INTO lists (board_id, title, position) VALUES (?,?,?)",
-        (bid, data.title.strip(), mx + 1),
-    )
-    conn.commit()
-    lid = cur.lastrowid
-    conn.close()
-    return {"id": lid, "title": data.title.strip(), "cards": []}
+    mx = db.query(func.max(List.position)).filter_by(board_id=bid).scalar()
+    lst = List(board_id=bid, title=data.title.strip(), position=(mx or 0) + 1 if mx is not None else 0)
+    db.add(lst)
+    db.commit()
+    db.refresh(lst)
+    return {"id": lst.id, "title": lst.title, "cards": []}
 
 
 @app.delete("/api/lists/{lid}")
-def delete_list(lid: int, user: dict = Depends(get_current_user)):
-    conn = db()
-    lst = conn.execute("SELECT * FROM lists WHERE id = ?", (lid,)).fetchone()
+def delete_list(
+    lid: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    lst = db.get(List, lid)
     if not lst:
-        conn.close()
         raise HTTPException(404, "List not found")
-    if not is_board_admin(conn, user, lst["board_id"]):
-        conn.close()
+    if not is_board_admin(db, user, lst.board_id):
         raise HTTPException(403, "Board admin only")
-    conn.execute("DELETE FROM lists WHERE id = ?", (lid,))
-    conn.commit()
-    conn.close()
+    db.query(Card).filter_by(list_id=lid).delete()
+    db.delete(lst)
+    db.commit()
     return {"ok": True}
 
 
 # ---------------- card routes ----------------
 @app.post("/api/lists/{lid}/cards")
-def create_card(lid: int, data: CardIn, user: dict = Depends(get_current_user)):
-    conn = db()
-    lst = conn.execute("SELECT * FROM lists WHERE id = ?", (lid,)).fetchone()
+def create_card(
+    lid: int, data: CardIn,
+    user: dict = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    lst = db.get(List, lid)
     if not lst:
-        conn.close()
         raise HTTPException(404, "List not found")
-    if not can_access_board(conn, user, lst["board_id"]):
-        conn.close()
+    if not can_access_board(db, user, lst.board_id):
         raise HTTPException(403, "No access to this board")
     if data.assignee_id:
-        ok = conn.execute(
-            "SELECT 1 FROM board_members WHERE board_id = ? AND user_id = ?",
-            (lst["board_id"], data.assignee_id),
-        ).fetchone()
+        ok = (
+            db.query(BoardMember)
+            .filter_by(board_id=lst.board_id, user_id=data.assignee_id)
+            .first()
+        )
         if not ok:
-            conn.close()
             raise HTTPException(400, "Assignee is not a board member")
-    mx = conn.execute(
-        "SELECT COALESCE(MAX(position), -1) AS m FROM cards WHERE list_id = ?", (lid,)
-    ).fetchone()["m"]
-    cur = conn.execute(
-        """INSERT INTO cards (board_id, list_id, title, description, assignee_id,
-           due_date, position, created_by, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        (
-            lst["board_id"], lid, data.title.strip(), data.description.strip(),
-            data.assignee_id, data.due_date, mx + 1, user["id"], now_iso(),
-        ),
+    mx = db.query(func.max(Card.position)).filter_by(list_id=lid).scalar()
+    c = Card(
+        board_id=lst.board_id,
+        list_id=lid,
+        title=data.title.strip(),
+        description=data.description.strip(),
+        assignee_id=data.assignee_id,
+        due_date=data.due_date,
+        position=(mx + 1) if mx is not None else 0,
+        created_by=user["id"],
+        created_at=now_iso(),
     )
-    conn.commit()
-    cid = cur.lastrowid
-    conn.close()
-    return {"id": cid, "title": data.title.strip()}
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return {"id": c.id, "title": c.title}
 
 
 @app.patch("/api/cards/{cid}")
-def update_card(cid: int, data: CardMove, user: dict = Depends(get_current_user)):
-    conn = db()
-    c = conn.execute("SELECT * FROM cards WHERE id = ?", (cid,)).fetchone()
+def update_card(
+    cid: int, data: CardMove,
+    user: dict = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    c = db.get(Card, cid)
     if not c:
-        conn.close()
         raise HTTPException(404, "Card not found")
-    if not can_access_board(conn, user, c["board_id"]):
-        conn.close()
+    if not can_access_board(db, user, c.board_id):
         raise HTTPException(403, "No access to this board")
-    fields, vals = [], []
     if data.title is not None:
-        fields.append("title = ?")
-        vals.append(data.title.strip())
+        c.title = data.title.strip()
     if data.description is not None:
-        fields.append("description = ?")
-        vals.append(data.description.strip())
+        c.description = data.description.strip()
     if data.assignee_id is not None:
-        ok = conn.execute(
-            "SELECT 1 FROM board_members WHERE board_id = ? AND user_id = ?",
-            (c["board_id"], data.assignee_id),
-        ).fetchone()
+        ok = (
+            db.query(BoardMember)
+            .filter_by(board_id=c.board_id, user_id=data.assignee_id)
+            .first()
+        )
         if not ok:
-            conn.close()
             raise HTTPException(400, "Assignee is not a board member")
-        fields.append("assignee_id = ?")
-        vals.append(data.assignee_id)
+        c.assignee_id = data.assignee_id
     if data.due_date is not None:
-        fields.append("due_date = ?")
-        vals.append(data.due_date or None)
+        c.due_date = data.due_date or None
     if data.list_id is not None:
-        lst = conn.execute("SELECT * FROM lists WHERE id = ?", (data.list_id,)).fetchone()
-        if not lst or lst["board_id"] != c["board_id"]:
-            conn.close()
+        lst = db.get(List, data.list_id)
+        if not lst or lst.board_id != c.board_id:
             raise HTTPException(400, "Invalid target list")
-        fields.append("list_id = ?")
-        vals.append(data.list_id)
+        c.list_id = data.list_id
     if data.position is not None:
-        fields.append("position = ?")
-        vals.append(data.position)
-    if fields:
-        vals.append(cid)
-        conn.execute(f"UPDATE cards SET {', '.join(fields)} WHERE id = ?", vals)
-        conn.commit()
-    conn.close()
+        c.position = data.position
+    db.commit()
     return {"ok": True}
 
 
 @app.delete("/api/cards/{cid}")
-def delete_card(cid: int, user: dict = Depends(get_current_user)):
-    conn = db()
-    c = conn.execute("SELECT * FROM cards WHERE id = ?", (cid,)).fetchone()
+def delete_card(
+    cid: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    c = db.get(Card, cid)
     if not c:
-        conn.close()
         raise HTTPException(404, "Card not found")
-    if not can_access_board(conn, user, c["board_id"]):
-        conn.close()
+    if not can_access_board(db, user, c.board_id):
         raise HTTPException(403, "No access to this board")
-    conn.execute("DELETE FROM cards WHERE id = ?", (cid,))
-    conn.commit()
-    conn.close()
+    db.delete(c)
+    db.commit()
     return {"ok": True}
 
 
