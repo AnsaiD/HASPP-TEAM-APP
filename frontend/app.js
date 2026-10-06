@@ -133,6 +133,7 @@ async function renderDashboard() {
     const title = $("#nbTitle").value.trim();
     if (!title) return;
     await api("/boards", "POST", { title, description: "" });
+    $("#nbTitle").value = "";
     renderDashboard();
   };
   document.querySelectorAll(".board-card").forEach(c =>
@@ -169,6 +170,7 @@ async function renderBoard() {
   $("#nlBtn").onclick = async () => {
     const title = $("#nlTitle").value.trim(); if (!title) return;
     await api(`/boards/${currentBoard}/lists`, "POST", { title });
+    $("#nlTitle").value = "";
     renderBoard();
   };
   $("#memBtn").onclick = () => showMembersModal(b, isBAdmin);
@@ -381,6 +383,10 @@ async function renderAdmin() {
     }
     try {
       await api("/users", "POST", body);
+      $("#nuName").value = "";
+      $("#nuEmail").value = "";
+      $("#nuPass").value = "";
+      $("#nuRole").value = "member";
       renderAdmin();
     } catch (e) { alert(e.message); }
   };
