@@ -109,3 +109,5 @@ table.admin-table { width: 100%; border-collapse: collapse; background: var(--ca
 .tab { padding: 8px 18px; border-radius: 8px; border: 1px solid var(--green); background: transparent; color: var(--green); cursor: pointer; font-weight: 600; }
 .tab.active { background: var(--green); color: #fff; }
 .due { color: var(--danger); font-weight: 600; }
+.center { text-align: center; padding: 60px 20px; }
+.center .hint { font-size: 1.1em; margin-bottom: 16px; }

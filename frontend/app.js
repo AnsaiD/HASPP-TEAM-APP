@@ -25,6 +25,9 @@ const T = {
     confirmDeleteUser: "Ma hubtaa inaad TIRTIRTO user-kan? Tani waa permanent!",
     cannotDeleteSelf: "Ma tirtiri kartid naftaada",
     cannotDeleteLastAdmin: "Ma tirtiri kartid admin-ka ugu dambeeya",
+    wakingUp: "Server-ku waa toosayaa, fadlan sug…",
+    retry: "Isku day mar kale",
+    networkError: "Server-ka lama xiriirin. Sug daqiiqo kadibna isku day mar kale.",
   },
   en: {
     login: "Log in", register: "Sign up", name: "Name", email: "Email",
@@ -51,6 +54,9 @@ const T = {
     confirmDeleteUser: "Are you sure you want to DELETE this user? This is permanent!",
     cannotDeleteSelf: "You cannot delete yourself",
     cannotDeleteLastAdmin: "Cannot delete the last admin",
+    wakingUp: "Server is waking up, please wait…",
+    retry: "Retry",
+    networkError: "Could not reach the server. Wait a moment and try again.",
   }
 };
 let lang = localStorage.getItem("hta_lang") || "so";
@@ -107,7 +113,10 @@ function renderAuth(mode = "login") {
       view = "dashboard"; render();
     } catch (e) {
       const el = $("#err");
-      el.textContent = e.message.includes("registered") ? t("emailTaken") : t("wrongCreds");
+      const msg = e.message || "";
+      el.textContent = msg.includes("registered") ? t("emailTaken")
+        : msg === "auth" ? t("wrongCreds")
+        : t("networkError");
       el.classList.remove("hidden");
     }
   };
@@ -398,7 +407,7 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-async function render() {
+async function render(attempt = 0) {
   document.documentElement.lang = lang;
   $("#langToggle").textContent = lang === "so" ? "EN" : "SO";
   $("#logoutBtn").textContent = t("logout");
@@ -408,7 +417,15 @@ async function render() {
   }
   try {
     if (!me) me = await api("/me");
-  } catch { renderAuth(); return; }
+  } catch {
+    if (!token || attempt >= 10) { renderAuth(); return; }  // invalid token → real login page
+    // Network error = server waking up. Don't show login page — retry instead.
+    app.innerHTML = `<div class="center"><p class="hint">⏳ ${t("wakingUp")}</p>
+      <button class="btn" id="retryBtn">${t("retry")}</button></div>`;
+    $("#retryBtn").onclick = () => render();
+    setTimeout(() => { if (token && !me) render(attempt + 1); }, 6000);
+    return;
+  }
   $("#userInfo").textContent = `${me.name} (${me.role})`;
   $("#userInfo").classList.remove("hidden");
   $("#logoutBtn").classList.remove("hidden");

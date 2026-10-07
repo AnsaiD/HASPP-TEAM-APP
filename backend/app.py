@@ -26,7 +26,7 @@ FRONTEND_DIR = BASE_DIR.parent / "frontend"
 
 SECRET_KEY = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 ALGORITHM = "HS256"
-TOKEN_HOURS = 72
+TOKEN_HOURS = 720  # 30 days — stay logged in
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 if DATABASE_URL.startswith("postgres://"):
