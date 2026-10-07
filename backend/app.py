@@ -28,7 +28,17 @@ SECRET_KEY = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 ALGORITHM = "HS256"
 TOKEN_HOURS = 720  # 30 days — stay logged in
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    # Local development only: set ALLOW_SQLITE=true to use a local file DB.
+    if os.getenv("ALLOW_SQLITE", "").lower() == "true":
+        DATABASE_URL = "sqlite:///./haspp_team.db"
+    else:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Refusing to start with an ephemeral "
+            "SQLite database in production (all data would be lost on redeploy). "
+            "Set DATABASE_URL to your PostgreSQL/Neon connection string."
+        )
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
